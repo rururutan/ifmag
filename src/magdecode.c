@@ -156,13 +156,15 @@ int mag_decode(const uint8_t *data, size_t size, MagImage *image)
                     packed[dst] = pixel[pixel_pos++];
                     packed[dst + 1] = pixel[pixel_pos++];
                 } else {
-                    int src_y = (int)y - copy_y[code];
-                    int src_x = (int)(group * 4 + (size_t)half * 2) - copy_x[code];
+                    size_t distance = (size_t)copy_y[code] * h.row_bytes +
+                                      (size_t)copy_x[code];
                     size_t src;
-                    if (src_y < 0 || src_x < 0 || src_x + 1 >= (int)h.row_bytes) {
+                    /* Copy offsets address a linear virtual VRAM. A horizontal
+                     * reference may therefore wrap into the preceding row. */
+                    if (dst < distance) {
                         rc = MAG_ERR_FORMAT; goto done;
                     }
-                    src = (size_t)src_y * h.row_bytes + (size_t)src_x;
+                    src = dst - distance;
                     packed[dst] = packed[src]; packed[dst + 1] = packed[src + 1];
                 }
             }

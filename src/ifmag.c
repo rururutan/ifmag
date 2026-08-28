@@ -19,7 +19,7 @@
 /* The shared SPI I/O header predates this helper and lacks its declaration. */
 LONG_PTR SpiGetFileSize(SPI_FILE *fp);
 
-#define IFMAG_VERSION "0.20"
+#define IFMAG_VERSION "0.30"
 
 const int NumInfo = 4;
 const LPCSTR PluginInfo[] = {
