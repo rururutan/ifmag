@@ -1,3 +1,12 @@
+/**
+ * @file ifmag.c
+ * @brief Susie 32/64-bit plug-in adapter for MAG (MAKI02) images.
+ *
+ * Implements format detection, image-information retrieval, and DIB creation.
+ * MAG parsing and decompression are delegated to magdecode.c, while the common
+ * Susie entry-point layer is supplied by the shared SPI sources.
+ */
+
 #define STRICT
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -10,7 +19,7 @@
 /* The shared SPI I/O header predates this helper and lacks its declaration. */
 LONG_PTR SpiGetFileSize(SPI_FILE *fp);
 
-#define IFMAG_VERSION "0.10"
+#define IFMAG_VERSION "0.20"
 
 const int NumInfo = 4;
 const LPCSTR PluginInfo[] = {
@@ -101,9 +110,16 @@ int GetImage(SPI_FILE *fp, HANDLE *pHBInfo, HANDLE *pHBImg,
         bmi->bmiColors[x].rgbReserved = 0;
     }
     for (y = 0; y < image.height; ++y) {
-        const uint8_t *src = image.pixels + (image.height - 1 - y) * image.width;
+        const uint8_t *src = image.pixels + (image.height - 1 - y) * image.width *
+                             (image.bits_per_pixel == 24 ? 3 : 1);
         uint8_t *dst = bits + y * rowbytes;
-        if (image.bits_per_pixel == 8) {
+        if (image.bits_per_pixel == 24) {
+            for (x = 0; x < image.width; ++x) {
+                dst[x * 3] = src[x * 3 + 2];
+                dst[x * 3 + 1] = src[x * 3 + 1];
+                dst[x * 3 + 2] = src[x * 3];
+            }
+        } else if (image.bits_per_pixel == 8) {
             memcpy(dst, src, image.width);
         } else {
             for (x = 0; x < image.width; x += 2) {

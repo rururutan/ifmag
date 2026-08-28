@@ -1,3 +1,12 @@
+/**
+ * @file magdecode.c
+ * @brief Bounds-checked MAG (MAKI02) image decoder implementation.
+ *
+ * Decodes the MAG flag and pixel streams, restores indexed images, and applies
+ * MSX-specific SCREEN 6, SCREEN 10, and SCREEN 12 color interpretation without
+ * display-aspect scaling.
+ */
+
 #include "magdecode.h"
 
 #include <stdlib.h>
@@ -5,6 +14,8 @@
 
 typedef struct MagHeader {
     size_t base;
+    uint8_t machine_code;
+    uint8_t machine_flag;
     uint8_t screen_mode;
     uint16_t sx, sy, ex, ey;
     uint32_t flaga_off, flagb_off, flagb_size, pixel_off, pixel_size;
@@ -48,6 +59,8 @@ static int parse_header(const uint8_t *data, size_t size, MagHeader *h)
     if (p[0] != 0)
         return MAG_ERR_FORMAT;
 
+    h->machine_code = p[1];
+    h->machine_flag = p[2];
     h->screen_mode = p[3];
     h->sx = le16(p + 4); h->sy = le16(p + 6);
     h->ex = le16(p + 8); h->ey = le16(p + 10);
@@ -90,8 +103,9 @@ int mag_decode(const uint8_t *data, size_t size, MagImage *image)
     const uint8_t *flaga, *flagb, *pixel, *palette;
     size_t flaga_size, flagb_pos = 0, pixel_pos = 0;
     size_t palette_count, palette_size, height, packed_size, pixel_count;
+    unsigned msx_mode;
     uint8_t bit_mask = 0x80;
-    size_t flaga_pos = 0, y, g, i;
+    size_t flaga_pos = 0, y, group, i;
     int rc;
 
     if (!image) return MAG_ERR_FORMAT;
@@ -122,16 +136,16 @@ int mag_decode(const uint8_t *data, size_t size, MagImage *image)
     pixel = data + h.base + h.pixel_off;
 
     for (y = 0; y < height; ++y) {
-        for (g = 0; g < h.groups_per_row; ++g) {
+        for (group = 0; group < h.groups_per_row; ++group) {
             uint8_t flag = 0;
-            size_t out = y * h.row_bytes + g * 4;
+            size_t out = y * h.row_bytes + group * 4;
             int half;
             if (flaga[flaga_pos] & bit_mask) {
                 if (flagb_pos >= h.flagb_size) { rc = MAG_ERR_TRUNCATED; goto done; }
                 flag = flagb[flagb_pos++];
             }
-            flag ^= flags[g];
-            flags[g] = flag;
+            flag ^= flags[group];
+            flags[group] = flag;
             if ((bit_mask >>= 1) == 0) { bit_mask = 0x80; ++flaga_pos; }
 
             for (half = 0; half < 2; ++half) {
@@ -143,7 +157,7 @@ int mag_decode(const uint8_t *data, size_t size, MagImage *image)
                     packed[dst + 1] = pixel[pixel_pos++];
                 } else {
                     int src_y = (int)y - copy_y[code];
-                    int src_x = (int)(g * 4 + (size_t)half * 2) - copy_x[code];
+                    int src_x = (int)(group * 4 + (size_t)half * 2) - copy_x[code];
                     size_t src;
                     if (src_y < 0 || src_x < 0 || src_x + 1 >= (int)h.row_bytes) {
                         rc = MAG_ERR_FORMAT; goto done;
@@ -155,21 +169,85 @@ int mag_decode(const uint8_t *data, size_t size, MagImage *image)
         }
     }
 
+    msx_mode = h.machine_code == 3 ? h.machine_flag & 0xfcu : 0;
     image->width = (uint32_t)h.ex - h.sx + 1;
     image->height = (uint32_t)height;
     image->origin_x = h.sx; image->origin_y = h.sy;
     image->bits_per_pixel = h.screen_mode < 0x80 ? 4 : 8;
     image->palette_entries = (uint16_t)palette_count;
     for (i = 0; i < palette_count; ++i) {
+        uint8_t r, g, b;
         /* MAG stores palette triples as G, R, B. */
-        image->palette[i][0] = palette[i * 3 + 1];
-        image->palette[i][1] = palette[i * 3];
-        image->palette[i][2] = palette[i * 3 + 2];
+        r = palette[i * 3 + 1]; g = palette[i * 3]; b = palette[i * 3 + 2];
+        if (h.machine_code == 3) {
+            r &= 0xe0; g &= 0xe0; b &= 0xe0;
+            r = (uint8_t)(r | r >> 3 | r >> 6);
+            g = (uint8_t)(g | g >> 3 | g >> 6);
+            b = (uint8_t)(b | b >> 3 | b >> 6);
+        }
+        image->palette[i][0] = r; image->palette[i][1] = g; image->palette[i][2] = b;
     }
-    pixel_count = (size_t)image->width * image->height;
-    image->pixels = (uint8_t *)malloc(pixel_count);
-    if (!image->pixels) { rc = MAG_ERR_MEMORY; goto done; }
-    {
+
+    if (msx_mode == 32 || msx_mode == 36 || msx_mode == 64 || msx_mode == 68) {
+        /* MSX2+ SCREEN 10/12: four source bytes encode four YJK pixels. */
+        uint32_t crop = h.screen_mode < 0x80 ? (h.sx - h.aligned_x) / 2 : h.sx - h.aligned_x;
+        image->width = h.screen_mode < 0x80 ? (image->width + 1) / 2 : image->width;
+        image->bits_per_pixel = 24;
+        image->palette_entries = 0;
+        pixel_count = (size_t)image->width * image->height;
+        if (pixel_count > SIZE_MAX / 3) { rc = MAG_ERR_FORMAT; goto done; }
+        image->pixels = (uint8_t *)malloc(pixel_count * 3);
+        if (!image->pixels) { rc = MAG_ERR_MEMORY; goto done; }
+        for (y = 0; y < height; ++y) {
+            const uint8_t *line = packed + y * h.row_bytes + crop;
+            for (i = 0; i < image->width; ++i) {
+                unsigned yy = line[i] >> 3;
+                int k, j, r, g, b;
+                uint8_t *dst = image->pixels + (y * image->width + i) * 3;
+                if ((msx_mode == 32 || msx_mode == 36) && (yy & 1u)) {
+                    unsigned c = yy >> 1;
+                    dst[0] = image->palette[c][0]; dst[1] = image->palette[c][1]; dst[2] = image->palette[c][2];
+                    continue;
+                }
+                if ((i | 3u) >= image->width) {
+                    r = g = b = (int)yy;
+                } else {
+                    size_t q = i & ~(size_t)3;
+                    k = (line[q] & 7) | ((line[q + 1] & 7) << 3);
+                    j = (line[q + 2] & 7) | ((line[q + 3] & 7) << 3);
+                    if (k & 32) k -= 64;
+                    if (j & 32) j -= 64;
+                    r = (int)yy + j; g = (int)yy + k;
+                    b = (5 * (int)yy - 2 * j - k + 2) >> 2;
+                    if (r < 0) r = 0; else if (r > 31) r = 31;
+                    if (g < 0) g = 0; else if (g > 31) g = 31;
+                    if (b < 0) b = 0; else if (b > 31) b = 31;
+                }
+                dst[0] = (uint8_t)((r << 3) | (r >> 2));
+                dst[1] = (uint8_t)((g << 3) | (g >> 2));
+                dst[2] = (uint8_t)((b << 3) | (b >> 2));
+            }
+        }
+    } else if (msx_mode == 96 || msx_mode == 100) {
+        /* MSX2 SCREEN 6: each compressed byte contains four 2-bit pixels. */
+        uint32_t crop = h.screen_mode < 0x80 ? (h.sx - h.aligned_x) / 2 : h.sx - h.aligned_x;
+        uint32_t source_bytes = (image->width + 1) / 2;
+        image->width = source_bytes * 4;
+        image->bits_per_pixel = 4;
+        image->palette_entries = 16;
+        pixel_count = (size_t)image->width * image->height;
+        image->pixels = (uint8_t *)malloc(pixel_count);
+        if (!image->pixels) { rc = MAG_ERR_MEMORY; goto done; }
+        for (y = 0; y < height; ++y) {
+            const uint8_t *line = packed + y * h.row_bytes + crop;
+            for (i = 0; i < image->width; ++i)
+                image->pixels[y * image->width + i] = (uint8_t)((line[i >> 2] >> ((~i & 3) << 1)) & 3);
+        }
+    } else {
+        pixel_count = (size_t)image->width * image->height;
+        image->pixels = (uint8_t *)malloc(pixel_count);
+        if (!image->pixels) { rc = MAG_ERR_MEMORY; goto done; }
+        {
         uint32_t crop = h.sx - h.aligned_x;
         for (y = 0; y < height; ++y) {
             size_t x;
@@ -179,6 +257,7 @@ int mag_decode(const uint8_t *data, size_t size, MagImage *image)
                 image->pixels[y * image->width + x] = image->bits_per_pixel == 4
                     ? ((ax & 1) ? (v & 15u) : (v >> 4)) : v;
             }
+        }
         }
     }
     if (h.base > 32) {
