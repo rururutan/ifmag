@@ -2,6 +2,12 @@
 
 This software is a Susie x64 plugin for MAG(まぐろーだー) format images.
 
+
+## Build
+
+Open `src/ifmag.sln` in Visual Studio 2022 and build the `Release|x64`
+configuration. The output file is `x64/Release/ifmag.sph`.
+
 ## Thanks
 
 The Susie I/F layer code was based on Masaru Miyasaka's Susie32 Pi Plug-in.
