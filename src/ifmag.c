@@ -10,6 +10,7 @@
 #define STRICT
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -19,7 +20,7 @@
 /* The shared SPI I/O header predates this helper and lacks its declaration. */
 LONG_PTR SpiGetFileSize(SPI_FILE *fp);
 
-#define IFMAG_VERSION "0.30"
+#define IFMAG_VERSION "0.20"
 
 const int NumInfo = 4;
 const LPCSTR PluginInfo[] = {
@@ -58,7 +59,68 @@ static int decode_error(int rc)
     return rc == MAG_ERR_MEMORY ? SPI_ERROR_ALLOCATE_MEMORY : SPI_ERROR_BROKEN_DATA;
 }
 
-int GetImageInfo(SPI_FILE *fp, PictureInfo *lpInfo)
+/** Store a MAG Shift-JIS comment in the encoding required by the Susie API. */
+static int set_comment(PictureInfo *info, const char *comment, int utf8)
+{
+    size_t source_length;
+    LPBYTE output;
+    if (!comment || !comment[0]) return SPI_ERROR_SUCCESS;
+    source_length = strlen(comment);
+    if (!utf8) {
+        int ret = SpiAllocBuffer(&info->hInfo, &output, source_length + 1u);
+        if (ret != SPI_ERROR_SUCCESS) return ret;
+        memcpy(output, comment, source_length + 1u);
+        SpiUnlockBuffer(&info->hInfo);
+        return SPI_ERROR_SUCCESS;
+    }
+    {
+        WCHAR *wide;
+        int wide_length;
+        int utf8_length;
+        size_t output_length;
+        if (source_length > INT_MAX) return SPI_ERROR_ALLOCATE_MEMORY;
+        wide_length = MultiByteToWideChar(932, 0, comment, (int)source_length,
+                                          NULL, 0);
+        if (wide_length <= 0) return SPI_ERROR_BROKEN_DATA;
+        wide = (WCHAR *)malloc((size_t)wide_length * sizeof(*wide));
+        if (!wide) return SPI_ERROR_ALLOCATE_MEMORY;
+        if (MultiByteToWideChar(932, 0, comment, (int)source_length,
+                                wide, wide_length) != wide_length) {
+            free(wide);
+            return SPI_ERROR_BROKEN_DATA;
+        }
+        utf8_length = WideCharToMultiByte(CP_UTF8, 0, wide, wide_length,
+                                          NULL, 0, NULL, NULL);
+        output_length = 3u + (size_t)utf8_length + 1u;
+        if (utf8_length <= 0) {
+            free(wide);
+            return SPI_ERROR_BROKEN_DATA;
+        }
+        if (SpiAllocBuffer(&info->hInfo, &output, output_length) !=
+            SPI_ERROR_SUCCESS) {
+            free(wide);
+            return SPI_ERROR_ALLOCATE_MEMORY;
+        }
+        output[0] = 0xef;
+        output[1] = 0xbb;
+        output[2] = 0xbf;
+        if (WideCharToMultiByte(CP_UTF8, 0, wide, wide_length,
+                                (LPSTR)output + 3, utf8_length,
+                                NULL, NULL) != utf8_length) {
+            free(wide);
+            SpiUnlockBuffer(&info->hInfo);
+            SpiFreeBuffer(&info->hInfo);
+            return SPI_ERROR_BROKEN_DATA;
+        }
+        output[3 + utf8_length] = 0;
+        free(wide);
+        SpiUnlockBuffer(&info->hInfo);
+    }
+    return SPI_ERROR_SUCCESS;
+}
+
+/** Decode MAG metadata and return its comment in the requested encoding. */
+static int get_image_info(SPI_FILE *fp, PictureInfo *lpInfo, int utf8)
 {
     uint8_t *data = NULL;
     size_t size = 0;
@@ -70,16 +132,21 @@ int GetImageInfo(SPI_FILE *fp, PictureInfo *lpInfo)
     if (ret != MAG_OK) return decode_error(ret);
     SpiSetPictureInfo(lpInfo, image.width, image.height, image.bits_per_pixel,
                       image.origin_x, image.origin_y, 0, 0, NULL);
-    if (image.comment && image.comment[0]) {
-        size_t n = strlen(image.comment) + 1;
-        LPBYTE text;
-        if (SpiAllocBuffer(&lpInfo->hInfo, &text, n) == SPI_ERROR_SUCCESS) {
-            memcpy(text, image.comment, n);
-            SpiUnlockBuffer(&lpInfo->hInfo);
-        }
-    }
+    ret = set_comment(lpInfo, image.comment, utf8);
     mag_free(&image);
-    return SPI_ERROR_SUCCESS;
+    return ret;
+}
+
+/** Decode MAG metadata and return the original Shift-JIS comment. */
+int GetImageInfo(SPI_FILE *fp, PictureInfo *lpInfo)
+{
+    return get_image_info(fp, lpInfo, 0);
+}
+
+/** Decode MAG metadata and return a UTF-8 comment prefixed by a BOM. */
+int GetImageInfoW(SPI_FILE *fp, PictureInfo *lpInfo)
+{
+    return get_image_info(fp, lpInfo, 1);
 }
 
 int GetImage(SPI_FILE *fp, HANDLE *pHBInfo, HANDLE *pHBImg,

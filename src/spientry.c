@@ -188,7 +188,7 @@ int _export PASCAL
 	err = SpiOpenW(&f, buf, len, flag);
 	if (err != SPI_ERROR_SUCCESS) return err;
 
-	err = GetImageInfo(&f, lpInfo);
+	err = GetImageInfoW(&f, lpInfo);
 
 	SpiClose(&f);
 

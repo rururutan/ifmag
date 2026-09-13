@@ -303,6 +303,7 @@ void ExecAboutDialog(HWND);
 #endif
 int IsSupportedFormat(LPBYTE, DWORD, LPCSTR);
 int GetImageInfo(SPI_FILE *, PictureInfo *);
+int GetImageInfoW(SPI_FILE *, PictureInfo *);
 #ifdef SPI_IMPLEMENT_GETPREVIEW
 int GetImage(SPI_FILE *, HANDLE *, HANDLE *, SPIPROC, LONG_PTR, BOOL);
 #else
