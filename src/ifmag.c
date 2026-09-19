@@ -26,7 +26,7 @@ const int NumInfo = 4;
 const LPCSTR PluginInfo[] = {
     "00IN",
     "MAG to DIB filter ver." IFMAG_VERSION " (C) Ru^3",
-    "*.mag",
+    "*.mag;*.max",
     "MAG"
 };
 
